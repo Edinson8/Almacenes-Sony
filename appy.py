@@ -1,120 +1,93 @@
-from flask import Flask, render_template, request, redirect, url_for
+from flask import Flask, render_template, request, redirect, url_for, flash
 from flask_sqlalchemy import SQLAlchemy
+from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
 import json, csv, os
 
 app = Flask(__name__)
+app.secret_key = "clave_secreta"   # Necesario para sesiones
 
-# --- Crear carpetas necesarias ---
-os.makedirs('datos', exist_ok=True)
-os.makedirs('database', exist_ok=True)
-
-# --- Configuración de SQLite ---
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-db_path = os.path.join(BASE_DIR, 'database', 'usuarios.db')
-
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + db_path
+# -------------------- Configuración MySQL en la nube (db4free.net) --------------------
+app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+mysqlconnector://usuario_flask:tu_contraseña@db4free.net:3306/desarrollo_web'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
 db = SQLAlchemy(app)
 
-# Modelo para almacenar clientes
-class Usuario(db.Model):
+# -------------------- Flask-Login --------------------
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = "login"
+
+# -------------------- Modelo MySQL --------------------
+class Usuario(UserMixin, db.Model):
+    __tablename__ = 'usuarios'
     id = db.Column(db.Integer, primary_key=True)
     nombre = db.Column(db.String(100))
+    mail = db.Column(db.String(100), unique=True)
+    password = db.Column(db.String(200))  # nueva columna para password
 
-# Crear tabla si no existe
+@login_manager.user_loader
+def load_user(user_id):
+    return Usuario.query.get(int(user_id))
+
+# Crear tablas automáticamente
 with app.app_context():
     db.create_all()
 
-# -------------------- Página principal --------------------
+# -------------------- Rutas públicas --------------------
 @app.route('/')
 def index():
     return render_template("index.html")
 
-# Formulario de ingreso
 @app.route('/formulario')
 def formulario():
     return render_template("formulario.html")
 
-# -------------------- Persistencia TXT --------------------
-@app.route('/guardar_txt', methods=['POST'])
-def guardar_txt():
-    nombre = request.form['nombre']
-    with open("datos/datos.txt", "a", encoding="utf-8") as f:
-        f.write(nombre + "\n")
-    return redirect(url_for('index'))
+# -------------------- Rutas de Registro/Login --------------------
+@app.route('/register', methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        nombre = request.form['nombre']
+        email = request.form['mail']
+        password = generate_password_hash(request.form['password'])
 
-@app.route('/leer_txt')
-def leer_txt():
-    try:
-        with open("datos/datos.txt", "r", encoding="utf-8") as f:
-            contenido = f.readlines()
-    except FileNotFoundError:
-        contenido = []
-    return render_template("resultado.html", datos=contenido, titulo="Clientes (TXT)")
+        usuario_existente = Usuario.query.filter_by(mail=email).first()
+        if usuario_existente:
+            flash("El correo ya está registrado")
+            return redirect(url_for("register"))
 
-# -------------------- Persistencia JSON --------------------
-@app.route('/guardar_json', methods=['POST'])
-def guardar_json():
-    nombre = request.form['nombre']
-    data = []
-    try:
-        with open("datos/datos.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
-    
-    data.append({"nombre": nombre})
-
-    with open("datos/datos.json", "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-    
-    return redirect(url_for('index'))
-
-@app.route('/leer_json')
-def leer_json():
-    try:
-        with open("datos/datos.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        data = []
-    return render_template("resultado.html", datos=data, titulo="Clientes (JSON)")
-
-# -------------------- Persistencia CSV --------------------
-@app.route('/guardar_csv', methods=['POST'])
-def guardar_csv():
-    nombre = request.form['nombre']
-    with open("datos/datos.csv", "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([nombre])
-    return redirect(url_for('index'))
-
-@app.route('/leer_csv')
-def leer_csv():
-    data = []
-    try:
-        with open("datos/datos.csv", "r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            data = [row for row in reader if row]
-    except FileNotFoundError:
-        pass
-    return render_template("resultado.html", datos=data, titulo="Clientes (CSV)")
-
-# -------------------- Persistencia SQLite --------------------
-@app.route('/guardar_db', methods=['POST'])
-def guardar_db():
-    nombre = request.form['nombre']
-    if nombre.strip():
-        nuevo = Usuario(nombre=nombre)
+        nuevo = Usuario(nombre=nombre, mail=email, password=password)
         db.session.add(nuevo)
         db.session.commit()
-    return redirect(url_for('index'))
+        flash("Registro exitoso, ahora inicia sesión.")
+        return redirect(url_for("login"))
+    return render_template("register.html")
 
-@app.route('/leer_db')
-def leer_db():
-    usuarios = Usuario.query.all()
-    data = [u.nombre for u in usuarios]
-    return render_template("resultado.html", datos=data, titulo="Clientes (SQLite)")
+@app.route('/login', methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        email = request.form['mail']
+        password = request.form['password']
+        usuario = Usuario.query.filter_by(mail=email).first()
 
-# -------------------- Arranque del servidor --------------------
-if __name__ == '__main__':
-    app.run(debug=True)
+        if usuario and check_password_hash(usuario.password, password):
+            login_user(usuario)
+            return redirect(url_for("protegida"))
+        else:
+            flash("Correo o contraseña incorrectos.")
+    return render_template("login.html")
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    flash("Sesión cerrada.")
+    return redirect(url_for("login"))
+
+@app.route('/protegida')
+@login_required
+def protegida():
+    return f"Bienvenido {current_user.nombre}, accediste a la ruta protegida 🎉"
+
+# -------------------- Persistencia TXT/JSON/CSV/MySQL (igual que tu código) --------------------
+# ... aquí puedes dejar las funciones guardar_txt, leer_txt, guardar_json, leer_json, etc.
